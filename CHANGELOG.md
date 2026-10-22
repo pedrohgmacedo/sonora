@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Songs, albums and artists uploaded to your Apple Music library through iTunes or the Music app
+  can now be browsed and played.
+
 ## [0.44.2] - 2026-10-25
 
 ### Fixed

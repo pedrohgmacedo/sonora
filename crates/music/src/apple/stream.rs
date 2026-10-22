@@ -12,6 +12,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
 use crate::apple::auth::{self, AGENT};
+use crate::apple::client::AppleClient;
 use crate::apple::progressive::Media;
 use crate::vault::{Recording, Shelf};
 use crate::{Encoding, Offer, Quality};
@@ -47,18 +48,25 @@ pub(crate) const QUALITIES: &[Offer] = &[
 const TEXT_CEILING: usize = 1 << 20;
 
 /// A track resolved down to what it takes to read it: where the media is, and which key opens
-/// it.
+/// it for encrypted catalog tracks, or a direct asset URL without a license for plain uploads.
 #[derive(Clone, Debug)]
 pub struct Resolved {
-    /// The fMP4 the media playlist maps to.
+    /// The media file or fMP4 the track resolves to.
     pub asset: String,
-    /// The `URI` of the Widevine key, passed back to the license endpoint verbatim.
-    pub key_uri: String,
-    /// The key id, decoded from the tail of `key_uri`.
-    pub key_id: Vec<u8>,
+    /// The Widevine key for an encrypted catalog stream, absent on a plain upload.
+    pub key: Option<Key>,
     pub duration: Option<Duration>,
     /// The asset is the HE-AAC one, whose priming runs longer.
     pub extended: bool,
+}
+
+/// The Widevine key an encrypted stream is licensed with.
+#[derive(Clone, Debug)]
+pub struct Key {
+    /// The `URI` of the Widevine key, passed back to the license endpoint verbatim.
+    pub uri: String,
+    /// The key id, decoded from the tail of `uri`.
+    pub id: Vec<u8>,
 }
 
 /// A track ready to decode: decrypting as it is read, with its first seconds already in.
@@ -76,19 +84,32 @@ pub struct Loaded {
 /// no secret, since the file's own `pssh` carries it.
 #[derive(Serialize, Deserialize)]
 struct Facts {
+    #[serde(default)]
     key_uri: String,
+    #[serde(default)]
     key_id: Vec<u8>,
     duration_ms: Option<u64>,
+    #[serde(default)]
     extended: bool,
+    #[serde(default)]
+    plain: bool,
 }
 
-/// Resolves a catalog track, licenses it, and hands back a reader over its cleartext.
+/// The asset chosen to play: an encrypted CENC stream or a plain audio file.
+#[derive(Debug, PartialEq, Eq)]
+enum Selected {
+    Ctrp(&'static str, String),
+    Plain(String),
+}
+
+/// Resolves a track, licenses it if encrypted, and hands back a reader over its cleartext.
 ///
 /// The body and the license are fetched at the same time: the bytes do not depend on the
 /// license, and the CDM is only needed to read what has already arrived, so the round trip
-/// costs nothing that the download was not spending anyway.
+/// costs nothing that the download was not spending anyway. Unencrypted uploaded tracks fetch
+/// a direct asset stream without a Widevine license exchange.
 ///
-/// With a shelf, the encrypted file is kept as it arrives. A kept track skips the lookup and
+/// With a shelf, the file is kept as it arrives. A kept catalog track skips the lookup and
 /// the download but is licensed afresh on every play, so it plays only while Apple still
 /// hands this account its key.
 pub async fn prepare(
@@ -98,13 +119,12 @@ pub async fn prepare(
     quality: Quality,
     shelf: Option<&Shelf>,
 ) -> Result<Loaded> {
-    widevine::require()?;
-    let bearer = auth::bearer(http).await?;
     let variant = quality.within(QUALITIES).id();
     let recalled = match shelf {
         Some(shelf) => recall(shelf, adam_id, variant).await,
         None => None,
     };
+    let bearer = auth::bearer(http).await?;
     let (mut media, resolved) = match recalled {
         Some(recalled) => recalled,
         None => {
@@ -115,24 +135,49 @@ pub async fn prepare(
             let source = match shelf {
                 Some(shelf) => {
                     let facts = Facts {
-                        key_uri: resolved.key_uri.clone(),
-                        key_id: resolved.key_id.clone(),
+                        key_uri: resolved
+                            .key
+                            .as_ref()
+                            .map(|key| key.uri.clone())
+                            .unwrap_or_default(),
+                        key_id: resolved
+                            .key
+                            .as_ref()
+                            .map(|key| key.id.clone())
+                            .unwrap_or_default(),
                         duration_ms: resolved
                             .duration
                             .map(|duration| duration.as_millis() as u64),
                         extended: resolved.extended,
+                        plain: resolved.key.is_none(),
                     };
                     let facts = move || serde_json::to_vec(&facts).ok();
                     shelf.keep(adam_id, variant, facts, response)
                 }
                 None => Recording::through(response),
             };
+            if resolved.key.is_none() {
+                let media = Media::plain(source, total).await?;
+                return Ok(Loaded {
+                    media,
+                    duration: resolved.duration,
+                    extended: false,
+                });
+            }
             (Media::pulling(source, total), resolved)
         }
     };
+    let Some(key) = &resolved.key else {
+        return Ok(Loaded {
+            media,
+            duration: resolved.duration,
+            extended: false,
+        });
+    };
+    widevine::require()?;
 
     log::info!("apple: opening widevine");
-    let init = widevine::pssh(&resolved.key_id);
+    let init = widevine::pssh(&key.id);
     // One exchange at a time, held until the license is in. Preloading the next track while
     // this one licenses is the ordinary case, and the CDM cannot have two challenges open.
     let licensing = widevine::licensing().await;
@@ -147,7 +192,7 @@ pub async fn prepare(
     .context("the widevine challenge task failed")??;
 
     log::info!("apple: requesting license");
-    let license = license(http, &challenge, &resolved, adam_id, &bearer, user_token).await?;
+    let license = license(http, &challenge, &key.uri, adam_id, &bearer, user_token).await?;
     let cdm = tokio::task::spawn_blocking(move || -> Result<Cdm> {
         cdm.accept(&license)?;
         Ok(cdm)
@@ -157,7 +202,7 @@ pub async fn prepare(
     drop(licensing);
     log::info!("apple: license accepted");
 
-    media.license(cdm, resolved.key_id.clone())?;
+    media.license(cdm, key.id.clone())?;
     media.release_when_downloaded();
     media.prime().await?;
     Ok(Loaded {
@@ -167,24 +212,39 @@ pub async fn prepare(
     })
 }
 
-/// The kept encrypted file of a track and what licensing it takes, when the vault has it.
+/// The kept file of a track and what licensing it takes, when the vault has it.
 async fn recall(shelf: &Shelf, adam_id: &str, variant: &str) -> Option<(Media, Resolved)> {
     let kept = shelf.find(adam_id, variant).await?;
     let facts = serde_json::from_slice::<Facts>(&kept.facts)
         .inspect_err(|error| log::warn!("apple: the kept facts of {adam_id} do not read: {error}"))
         .ok()?;
+    if facts.plain || facts.key_uri.is_empty() {
+        log::info!("apple: {adam_id} comes from the vault as a plain upload");
+        let media = Media::plain(kept.source, Some(kept.length)).await.ok()?;
+        let resolved = Resolved {
+            asset: String::new(),
+            key: None,
+            duration: facts.duration_ms.map(Duration::from_millis),
+            extended: false,
+        };
+        return Some((media, resolved));
+    }
     log::info!("apple: {adam_id} comes from the vault and is licensed again");
     let resolved = Resolved {
         asset: String::new(),
-        key_uri: facts.key_uri,
-        key_id: facts.key_id,
+        key: Some(Key {
+            uri: facts.key_uri,
+            id: facts.key_id,
+        }),
         duration: facts.duration_ms.map(Duration::from_millis),
         extended: facts.extended,
     };
     Some((Media::pulling(kept.source, Some(kept.length)), resolved))
 }
 
-/// Asks web playback for the track and reads the media playlist of its asset at `quality`.
+/// Asks web playback for the track and resolves it to a playable asset: an encrypted catalog
+/// stream (by reading its media playlist at `quality`) or a direct URL for an unencrypted
+/// uploaded track.
 pub async fn resolve(
     http: &reqwest::Client,
     adam_id: &str,
@@ -192,7 +252,10 @@ pub async fn resolve(
     user_token: &str,
     quality: Quality,
 ) -> Result<Resolved> {
-    let body = serde_json::json!({ "salableAdamId": adam_id });
+    let body = match AppleClient::is_mine(adam_id) {
+        true => serde_json::json!({ "universalLibraryId": adam_id }),
+        false => serde_json::json!({ "salableAdamId": adam_id }),
+    };
     let response = http
         .post(PLAYBACK)
         .header(reqwest::header::USER_AGENT, AGENT)
@@ -225,35 +288,49 @@ pub async fn resolve(
         .and_then(serde_json::Value::as_array)
         .and_then(|songs| songs.first())
         .context("apple web playback listed no song")?;
-    let (flavor, asset) = select(song, quality)?;
-    log::info!("apple: selected {flavor}");
+    let selected = select(song, quality)?;
+    match selected {
+        Selected::Ctrp(flavor, asset) => {
+            log::info!("apple: selected {flavor}");
+            let playlist = read_playlist(http, &asset).await?;
+            let (file, key_uri) = parse_playlist(&playlist, &asset)
+                .context("the media playlist carries no widevine key")?;
+            let encoded = key_uri
+                .rsplit_once(',')
+                .map(|(_, kid)| kid)
+                .context("the widevine key uri names no key id")?;
+            let key_id = STANDARD
+                .decode(encoded)
+                .context("the widevine key id is not base64")?;
+            if key_id.len() != 16 {
+                log::warn!("apple: the key id is {} bytes rather than 16", key_id.len());
+            }
 
-    let playlist = read_playlist(http, &asset).await?;
-    let (file, key_uri) =
-        parse_playlist(&playlist, &asset).context("the media playlist carries no widevine key")?;
-    let encoded = key_uri
-        .rsplit_once(',')
-        .map(|(_, kid)| kid)
-        .context("the widevine key uri names no key id")?;
-    let key_id = STANDARD
-        .decode(encoded)
-        .context("the widevine key id is not base64")?;
-    if key_id.len() != 16 {
-        log::warn!("apple: the key id is {} bytes rather than 16", key_id.len());
+            Ok(Resolved {
+                asset: file,
+                key: Some(Key {
+                    uri: key_uri,
+                    id: key_id,
+                }),
+                duration: duration(song),
+                extended: flavor == FLAVORS[1],
+            })
+        }
+        Selected::Plain(asset) => {
+            log::info!("apple: selected plain asset");
+            Ok(Resolved {
+                asset,
+                key: None,
+                duration: duration(song),
+                extended: false,
+            })
+        }
     }
-
-    Ok(Resolved {
-        asset: file,
-        key_uri,
-        key_id,
-        duration: duration(song),
-        extended: flavor == FLAVORS[1],
-    })
 }
 
-/// The flavour and url of the asset a song entry is played from at `quality`. A song without
-/// that flavour plays the other one Widevine can open.
-fn select(song: &serde_json::Value, quality: Quality) -> Result<(&'static str, String)> {
+/// The flavour and url of the asset a song entry is played from at `quality`: an encrypted
+/// CENC stream (falling back to the other flavour Widevine can open) or a plain upload.
+fn select(song: &serde_json::Value, quality: Quality) -> Result<Selected> {
     if song
         .get("hls-playlist-url")
         .and_then(serde_json::Value::as_str)
@@ -286,10 +363,30 @@ fn select(song: &serde_json::Value, quality: Quality) -> Result<(&'static str, S
         Quality::Low | Quality::Normal => FLAVORS[1],
         Quality::High | Quality::Lossless | Quality::HiRes => FLAVORS[0],
     };
-    std::iter::once(wanted)
+    if let Some((flavor, url)) = std::iter::once(wanted)
         .chain(FLAVORS.into_iter().filter(|flavor| *flavor != wanted))
         .find_map(|flavor| url(flavor).map(|url| (flavor, url)))
-        .with_context(|| format!("the track has none of the {FLAVORS:?} assets"))
+    {
+        return Ok(Selected::Ctrp(flavor, url));
+    }
+    if let Some(url) = assets.iter().find_map(|asset| {
+        let flavor = asset.get("flavor").and_then(serde_json::Value::as_str);
+        if !matches!(flavor, None | Some("item:audio")) {
+            return None;
+        }
+        let url = asset.get("URL").and_then(serde_json::Value::as_str)?;
+        if url.is_empty() {
+            return None;
+        }
+        let path = url.split_once('?').map_or(url, |(path, _)| path);
+        if path.ends_with(".m3u8") {
+            return None;
+        }
+        Some(url.to_owned())
+    }) {
+        return Ok(Selected::Plain(url));
+    }
+    bail!("the track has none of the {FLAVORS:?} assets");
 }
 
 /// The track length, wherever this answer happens to carry it. Apple has moved it, and a
@@ -297,6 +394,7 @@ fn select(song: &serde_json::Value, quality: Quality) -> Result<(&'static str, S
 fn duration(song: &serde_json::Value) -> Option<Duration> {
     let millis = [
         song.pointer("/assets/0/metadata/durationInMillis"),
+        song.pointer("/assets/0/metadata/duration"),
         song.pointer("/metadata/durationInMillis"),
         song.get("durationInMillis"),
     ]
@@ -414,7 +512,7 @@ fn absolute(url: &str, base: &str) -> String {
 async fn license(
     http: &reqwest::Client,
     challenge: &[u8],
-    resolved: &Resolved,
+    key_uri: &str,
     adam_id: &str,
     bearer: &str,
     user_token: &str,
@@ -422,9 +520,9 @@ async fn license(
     let envelope = serde_json::json!({
         "challenge": STANDARD.encode(challenge),
         "key-system": "com.widevine.alpha",
-        "uri": resolved.key_uri,
+        "uri": key_uri,
         "adamId": adam_id,
-        "isLibrary": false,
+        "isLibrary": AppleClient::is_mine(adam_id),
         "user-initiated": true,
     });
     let response = http
@@ -561,7 +659,7 @@ audio.mp4
         });
         assert_eq!(
             select(&song, Quality::High).unwrap(),
-            (FLAVORS[0], "https://x/ctr.m3u8".to_owned())
+            Selected::Ctrp(FLAVORS[0], "https://x/ctr.m3u8".to_owned())
         );
     }
 
