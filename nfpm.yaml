@@ -1,0 +1,93 @@
+name: sonora
+version: "0.44.0"
+arch: "amd64"
+platform: "linux"
+section: sound
+priority: optional
+maintainer: "Sonora Contributors <https://github.com/sonorahq/sonora>"
+description: |-
+  A native music streaming client, built with Rust and GPUI.
+homepage: "https://github.com/sonorahq/sonora"
+license: "GPL-3.0-or-later"
+
+contents:
+  # ── binary ──────────────────────────────────────────────────────────────────
+  - src: target/release/sonora
+    dst: /usr/bin/sonora
+    file_info:
+      mode: 0755
+
+  # ── XDG desktop entry ───────────────────────────────────────────────────────
+  - src: assets/linux/sonora.desktop
+    dst: /usr/share/applications/sonora.desktop
+    file_info:
+      mode: 0644
+
+  # ── icon ────────────────────────────────────────────────────────────────────
+  - src: assets/linux/sonora.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/sonora.svg
+    file_info:
+      mode: 0644
+
+  - src: assets/linux/icons/hicolor/16x16/apps/sonora.png
+    dst: /usr/share/icons/hicolor/16x16/apps/sonora.png
+    file_info:
+      mode: 0644
+  - src: assets/linux/icons/hicolor/24x24/apps/sonora.png
+    dst: /usr/share/icons/hicolor/24x24/apps/sonora.png
+    file_info:
+      mode: 0644
+  - src: assets/linux/icons/hicolor/32x32/apps/sonora.png
+    dst: /usr/share/icons/hicolor/32x32/apps/sonora.png
+    file_info:
+      mode: 0644
+  - src: assets/linux/icons/hicolor/48x48/apps/sonora.png
+    dst: /usr/share/icons/hicolor/48x48/apps/sonora.png
+    file_info:
+      mode: 0644
+  - src: assets/linux/icons/hicolor/64x64/apps/sonora.png
+    dst: /usr/share/icons/hicolor/64x64/apps/sonora.png
+    file_info:
+      mode: 0644
+  - src: assets/linux/icons/hicolor/128x128/apps/sonora.png
+    dst: /usr/share/icons/hicolor/128x128/apps/sonora.png
+    file_info:
+      mode: 0644
+  - src: assets/linux/icons/hicolor/256x256/apps/sonora.png
+    dst: /usr/share/icons/hicolor/256x256/apps/sonora.png
+    file_info:
+      mode: 0644
+  - src: assets/linux/icons/hicolor/512x512/apps/sonora.png
+    dst: /usr/share/icons/hicolor/512x512/apps/sonora.png
+    file_info:
+      mode: 0644
+
+  # ── licenses ────────────────────────────────────────────────────────────────
+  - src: COPYING
+    dst: /usr/share/licenses/sonora/LICENSE
+    file_info:
+      mode: 0644
+
+  - src: THIRD-PARTY.md
+    dst: /usr/share/licenses/sonora/THIRD-PARTY.md
+    file_info:
+      mode: 0644
+
+overrides:
+  rpm:
+    depends:
+      - alsa-lib
+      - dbus-libs
+      - fontconfig
+      - freetype
+      - libX11
+      - libXcursor
+      - libXi
+      - libxcb
+      - libxkbcommon
+      - libxkbcommon-x11
+      - libwayland-client
+      - openssl-libs
+      - sqlite-libs
+      - vulkan-loader
+      - webkit2gtk4.1
