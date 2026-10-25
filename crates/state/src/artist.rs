@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{Context, Entity, EventEmitter, Task};
 use music::{Album, Artist, ArtistCatalogue, Track};
 use tokio::task::AbortHandle;
 
-use crate::{Io, Library, LibraryEvent, Session, SessionEvent, join};
+use crate::{Io, Library, LibraryEvent, Session, SessionEvent, Shelf, join};
 
 /// Signals that a local artist no longer has a page after the library changes.
 pub enum ArtistDetailEvent {
@@ -17,7 +18,10 @@ pub struct ArtistDetail {
     appears_on: Vec<Album>,
     loading: bool,
     error: Option<String>,
+    is_library: bool,
+    catalog_id: Option<String>,
     session: Entity<Session>,
+    library: Entity<Library>,
     io: Io,
     task: Option<Task<()>>,
     request: Option<AbortHandle>,
@@ -75,13 +79,25 @@ impl ArtistDetail {
         })
         .detach();
 
+        cx.observe(&library, |this, _, cx| {
+            if this.is_library
+                && let Some(id) = this.id.clone()
+            {
+                this.load_library(&id, cx);
+            }
+        })
+        .detach();
+
         Self {
             id: None,
             artist: None,
             appears_on: Vec::new(),
             loading: false,
             error: None,
+            is_library: false,
+            catalog_id: None,
             session,
+            library,
             io,
             task: None,
             request: None,
@@ -97,6 +113,14 @@ impl ArtistDetail {
 
     pub fn id(&self) -> Option<&str> {
         self.id.as_deref()
+    }
+
+    pub fn is_library(&self) -> bool {
+        self.is_library
+    }
+
+    pub fn catalog_id(&self) -> Option<&str> {
+        self.catalog_id.as_deref()
     }
 
     pub fn tracks(&self) -> &[Track] {
@@ -133,12 +157,16 @@ impl ArtistDetail {
     }
 
     pub fn open(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.id.as_deref() == Some(id) && (self.loading || self.artist.is_some()) {
+        if self.id.as_deref() == Some(id)
+            && !self.is_library
+            && (self.loading || self.artist.is_some())
+        {
             return;
         }
 
         self.clear();
         self.id = Some(id.to_owned());
+        self.is_library = false;
 
         let Some(catalog) = self.session.read(cx).catalog(id) else {
             cx.notify();
@@ -152,6 +180,177 @@ impl ArtistDetail {
             return;
         }
         self.load(id.to_owned(), false, cx);
+    }
+
+    pub fn open_library(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.id.as_deref() == Some(id) && self.is_library && self.artist.is_some() {
+            return;
+        }
+
+        self.clear();
+        self.id = Some(id.to_owned());
+        self.is_library = true;
+
+        self.load_library(id, cx);
+    }
+
+    pub fn refresh_library(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.id.clone() else {
+            return;
+        };
+        self.load_library(&id, cx);
+    }
+
+    fn load_library(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mut name: Option<String> = None;
+        let mut cover: Option<String> = None;
+
+        for shelf in [Shelf::Streaming, Shelf::Local] {
+            let held = self.library.read(cx);
+            let state = held.state(shelf);
+            if let Some(artist) = state.artists().iter().find(|a| a.id == id || a.name == id) {
+                name = Some(artist.name.clone());
+                cover = artist.cover.clone();
+                break;
+            }
+        }
+
+        if name.is_none() {
+            for shelf in [Shelf::Streaming, Shelf::Local] {
+                let held = self.library.read(cx);
+                let state = held.state(shelf);
+                if let Some(track) = state.tracks().iter().find(|t| {
+                    t.artist_refs
+                        .iter()
+                        .any(|r| r.id.as_deref() == Some(id) || r.name == id)
+                        || t.artists.eq_ignore_ascii_case(id)
+                }) {
+                    let matched_name = track
+                        .artist_refs
+                        .iter()
+                        .find(|r| r.id.as_deref() == Some(id) || r.name == id)
+                        .map(|r| r.name.clone())
+                        .unwrap_or_else(|| track.artists.clone());
+                    name = Some(matched_name);
+                    cover = track.cover.clone();
+                    break;
+                }
+            }
+        }
+
+        let artist_name = name.unwrap_or_else(|| id.to_owned());
+
+        if !music::is_library_id(id) && !music::is_local_id(id) {
+            self.catalog_id = Some(id.to_owned());
+        } else {
+            self.catalog_id = None;
+        }
+
+        let mut tracks = Vec::new();
+        let mut seen_tracks = HashSet::new();
+        for shelf in [Shelf::Streaming, Shelf::Local] {
+            let held = self.library.read(cx);
+            let state = held.state(shelf);
+            for track in state.tracks() {
+                let matches_artist = track.artist_refs.iter().any(|r| {
+                    r.id.as_deref() == Some(id) || r.name.eq_ignore_ascii_case(&artist_name)
+                }) || track.artists.eq_ignore_ascii_case(&artist_name);
+                if matches_artist {
+                    if let Some(track_id) = &track.id
+                        && !seen_tracks.insert(track_id.clone())
+                    {
+                        continue;
+                    }
+                    tracks.push(track.clone());
+                }
+            }
+        }
+
+        let mut albums = Vec::new();
+        let mut seen_albums = HashSet::new();
+        for shelf in [Shelf::Streaming, Shelf::Local] {
+            let held = self.library.read(cx);
+            let state = held.state(shelf);
+            for album in state.albums() {
+                let matches_artist = album.artist_refs.iter().any(|r| {
+                    r.id.as_deref() == Some(id) || r.name.eq_ignore_ascii_case(&artist_name)
+                }) || album.artists.eq_ignore_ascii_case(&artist_name);
+                if matches_artist && seen_albums.insert(album.id.clone()) {
+                    albums.push(album.clone());
+                }
+            }
+        }
+
+        for track in &tracks {
+            if let Some(album_id) = &track.album_id
+                && seen_albums.insert(album_id.clone())
+            {
+                albums.push(Album {
+                    id: album_id.clone(),
+                    name: track.album.clone(),
+                    artists: track.artists.clone(),
+                    artist_refs: track.artist_refs.clone(),
+                    cover: track.cover.clone(),
+                    cover_large: track.cover.clone(),
+                    release_type: music::ReleaseType::Album,
+                    year: 0,
+                    track_count: 0,
+                    release_date: String::new(),
+                    label: String::new(),
+                    copyrights: Vec::new(),
+                    added_at: track.added_at,
+                });
+            }
+        }
+
+        albums.sort_by(|a, b| {
+            b.year
+                .cmp(&a.year)
+                .then_with(|| b.added_at.cmp(&a.added_at))
+        });
+
+        if cover.is_none() {
+            cover = albums
+                .iter()
+                .find_map(|a| a.cover_large.clone().or_else(|| a.cover.clone()));
+        }
+
+        self.artist = Some(Arc::new(Artist {
+            name: artist_name,
+            cover_large: cover,
+            biography: None,
+            monthly_listeners: None,
+            top_tracks: tracks,
+            albums,
+        }));
+        self.loading = false;
+        self.error = None;
+        cx.notify();
+
+        if let Some(catalog_id) = self.catalog_id.clone()
+            && let Some(client) = self.session.read(cx).client()
+        {
+            let io = self.io.clone();
+            let asked_id = catalog_id.clone();
+            self.task = Some(cx.spawn(async move |this, cx| {
+                let id = asked_id.clone();
+                let found =
+                    join(io.spawn(async move { client.artist_images(vec![id]).await })).await;
+                if let Ok(found) = found
+                    && let Some(url) = found.get(&asked_id)
+                    && !url.is_empty()
+                {
+                    let url = url.clone();
+                    this.update(cx, |this, cx| {
+                        if let Some(artist) = this.artist.as_mut() {
+                            Arc::make_mut(artist).cover_large = Some(url);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }
+            }));
+        }
     }
 
     /// Drops the page and fetches it again from the provider, past the catalog cache, so it
@@ -304,5 +503,7 @@ impl ArtistDetail {
         self.loading = false;
         self.filling = false;
         self.error = None;
+        self.is_library = false;
+        self.catalog_id = None;
     }
 }

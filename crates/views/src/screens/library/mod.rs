@@ -733,7 +733,7 @@ impl LibraryView {
         let Some(artist) = artist else {
             return;
         };
-        navigate(Destination::Artist(artist.id.into()), cx);
+        navigate(Destination::LibraryArtist(artist.id.into()), cx);
     }
 
     fn drop_albums(&mut self, cx: &mut Context<Self>) {

@@ -295,6 +295,7 @@ impl ArtistView {
                 .left()
                 .menu(artist_menu(artist, self.playback.clone(), true, cx))
         });
+        let is_library = self.detail.read(cx).is_library();
         let actions = div()
             .flex()
             .items_center()
@@ -317,6 +318,8 @@ impl ArtistView {
                 .from(self.playing_from(cx)),
             )
             .children(self.favorite_button(cx))
+            .children(self.catalog_button(cx))
+            .children(self.library_artist_button(cx))
             .children(overflow);
 
         let cover = artist.and_then(|artist| artist.cover_large.clone());
@@ -330,13 +333,76 @@ impl ArtistView {
             .pending(artist.is_none() && self.detail.read(cx).is_loading())
             .pin(pin)
             .cover(cover)
-            .eyebrow(t!("artist-eyebrow"))
+            .eyebrow(match is_library {
+                true => t!("artist-library-eyebrow"),
+                false => t!("artist-eyebrow"),
+            })
             .when_some(listeners, |hero, listeners| {
                 hero.meta(HeroMetaStrip::new().text(listeners))
             })
             .actions(actions)
             .circle()
             .into_any_element()
+    }
+
+    fn catalog_button(&self, cx: &App) -> Option<Button> {
+        let detail = self.detail.read(cx);
+        if !detail.is_library() {
+            return None;
+        }
+        let catalog_id = detail.catalog_id()?.to_owned();
+        let provider = Sonora::global(cx)
+            .session
+            .read(cx)
+            .provider_name()
+            .unwrap_or("Apple Music");
+        Some(
+            Button::new("artist-view-catalog")
+                .outline()
+                .icon("icons/arrow-up-right.svg")
+                .label(t!("artist-view-catalog", provider = provider))
+                .on_click(move |_, _, cx| {
+                    router::navigate(router::Destination::Artist(catalog_id.clone().into()), cx);
+                }),
+        )
+    }
+
+    fn library_artist_button(&self, cx: &App) -> Option<Button> {
+        let detail = self.detail.read(cx);
+        if detail.is_library() {
+            return None;
+        }
+        let id = detail.id()?;
+        let library = Sonora::global(cx).library.clone();
+        let name = detail.artist().map(|a| a.name.as_str()).unwrap_or_default();
+        let has_library = [state::Shelf::Streaming, state::Shelf::Local]
+            .into_iter()
+            .any(|shelf| {
+                let state = library.read(cx).state(shelf);
+                state.artists().iter().any(|a| a.id == id || a.name == name)
+                    || state.tracks().iter().any(|t| {
+                        t.artist_refs
+                            .iter()
+                            .any(|r| r.id.as_deref() == Some(id) || r.name == name)
+                            || t.artists.eq_ignore_ascii_case(name)
+                    })
+            });
+        if !has_library {
+            return None;
+        }
+        let artist_id = id.to_owned();
+        Some(
+            Button::new("artist-view-library")
+                .outline()
+                .icon("icons/library-big.svg")
+                .label(t!("artist-view-library"))
+                .on_click(move |_, _, cx| {
+                    router::navigate(
+                        router::Destination::LibraryArtist(artist_id.clone().into()),
+                        cx,
+                    );
+                }),
+        )
     }
 
     fn saved_artist(&self, cx: &App) -> Option<SavedArtist> {
@@ -812,6 +878,7 @@ impl ArtistView {
         let playback = self.playback.clone();
         let opened = cx.entity().downgrade();
 
+        let is_library = self.detail.read(cx).is_library();
         Picks::new(
             "artist-popular",
             tracks,
@@ -819,7 +886,10 @@ impl ArtistView {
             self.width,
             self.popular_page,
         )
-        .title("artist-popular")
+        .title(match is_library {
+            true => "artist-library-songs",
+            false => "artist-popular",
+        })
         .eyebrow(i18n::lookup("artist-popular-eyebrow", None))
         .vacancy("artist-popular-empty")
         .detailed()
@@ -1012,7 +1082,11 @@ impl Render for ArtistView {
         let notify: Rc<dyn Fn(&mut App)> = Rc::new(move |cx: &mut App| {
             weak.update(cx, |_, cx| cx.notify()).ok();
         });
-        let rails = self.recommended(window, &notify, cx);
+        let is_library = self.detail.read(cx).is_library();
+        let rails = match is_library {
+            true => Vec::new(),
+            false => self.recommended(window, &notify, cx),
+        };
         let page = Scroller::new("artist-page", &self.scrollbar)
             .bottom_inset(crate::chrome::Chrome::bottom(cx))
             .px(inset)
@@ -1025,7 +1099,10 @@ impl Render for ArtistView {
                         .pb_3()
                         .text_size(theme.text(Text::Title))
                         .font_weight(FontWeight::BOLD)
-                        .child(t!("artist-popular")),
+                        .child(match is_library {
+                            true => t!("artist-library-songs"),
+                            false => t!("artist-popular"),
+                        }),
                 )
             }))
             .child(tracks)

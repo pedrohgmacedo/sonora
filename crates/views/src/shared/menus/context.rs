@@ -427,7 +427,12 @@ impl ItemMenu {
                     MenuItem::new("go-to-artist", t!("menu-go-to-artist"))
                         .icon("icons/user.svg")
                         .on_click(move |_, _, cx| {
-                            navigate(Destination::Artist(id.clone().into()), cx)
+                            let current = router::trail(cx).read(cx).current();
+                            let destination = match current.in_library() {
+                                true => Destination::LibraryArtist(id.clone().into()),
+                                false => Destination::Artist(id.clone().into()),
+                            };
+                            navigate(destination, cx)
                         }),
                 )
             }
@@ -437,7 +442,12 @@ impl ItemMenu {
                     .max_h(gpui::px(360.))
                     .items(artists.into_iter().map(|(name, id)| {
                         MenuItem::new(format!("artist-{id}"), name).on_click(move |_, _, cx| {
-                            navigate(Destination::Artist(id.clone().into()), cx)
+                            let current = router::trail(cx).read(cx).current();
+                            let destination = match current.in_library() {
+                                true => Destination::LibraryArtist(id.clone().into()),
+                                false => Destination::Artist(id.clone().into()),
+                            };
+                            navigate(destination, cx)
                         })
                     }));
                 Some(

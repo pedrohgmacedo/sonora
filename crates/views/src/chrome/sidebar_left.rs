@@ -81,7 +81,7 @@ enum Group {
 impl Group {
     fn of(destination: &Destination) -> Option<Self> {
         match destination {
-            Destination::Library(_) => Some(Self::Library),
+            Destination::Library(_) | Destination::LibraryArtist(_) => Some(Self::Library),
             Destination::Local(_) => Some(Self::Local),
             _ => None,
         }
@@ -141,7 +141,7 @@ impl SidebarLeft {
         .detach();
 
         let at = trail.read(cx).current();
-        let library_open = matches!(at, Destination::Library(_));
+        let library_open = matches!(at, Destination::Library(_) | Destination::LibraryArtist(_));
         let local_open = matches!(at, Destination::Local(_));
 
         Self {
@@ -794,7 +794,10 @@ fn vacancy() -> AnyElement {
 /// Which groups the route opens: Your Library and Local Music, in that order.
 fn expanded(current: &Destination) -> (bool, bool) {
     (
-        matches!(current, Destination::Library(_)),
+        matches!(
+            current,
+            Destination::Library(_) | Destination::LibraryArtist(_)
+        ),
         matches!(current, Destination::Local(_)),
     )
 }

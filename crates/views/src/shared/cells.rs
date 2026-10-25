@@ -271,7 +271,14 @@ pub(crate) fn artist_links(
         fallback,
         color,
     )
-    .on_click(|id, cx| navigate(Destination::Artist(id), cx))
+    .on_click(|id, cx| {
+        let current = router::trail(cx).read(cx).current();
+        let destination = match current.in_library() {
+            true => Destination::LibraryArtist(id),
+            false => Destination::Artist(id),
+        };
+        navigate(destination, cx);
+    })
 }
 
 pub(crate) fn artists<F>(

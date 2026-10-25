@@ -175,6 +175,15 @@ pub enum SideTab {
     Lyrics,
 }
 
+/// The scope search queries against: the streaming provider's catalog or the listener's library.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchScope {
+    #[default]
+    Catalog,
+    Library,
+}
+
 /// The writing systems lyrics romanization applies to. Only CJK are enabled by default.
 /// A partial object in `settings.json` keeps the defaults for the scripts it leaves out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,6 +680,7 @@ struct StateValues {
     system_theme: String,
     /// The variant last chosen in each theme family, by family id.
     theme_variants: HashMap<String, String>,
+    search_scope: SearchScope,
 }
 
 impl Default for StateValues {
@@ -687,6 +697,7 @@ impl Default for StateValues {
             repeat: Repeat::Off,
             radio: true,
             provider: "spotify".to_owned(),
+            search_scope: SearchScope::Catalog,
             tables: HashMap::new(),
             sorting: HashMap::new(),
             filters: HashMap::new(),
@@ -1163,6 +1174,10 @@ impl AppSettings {
 
     pub fn sidebar_right_tab(&self) -> SideTab {
         self.state.sidebar_right_tab
+    }
+
+    pub fn search_scope(&self) -> SearchScope {
+        self.state.search_scope
     }
 
     /// The panel the fullscreen view last showed beside the cover, or `None` when it showed the
@@ -1796,6 +1811,15 @@ impl AppSettings {
         }
         self.state.sidebar_right_tab = tab;
         self.schedule_state_save(cx);
+    }
+
+    pub fn set_search_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
+        if self.state.search_scope == scope {
+            return;
+        }
+        self.state.search_scope = scope;
+        self.schedule_state_save(cx);
+        cx.notify();
     }
 
     pub fn set_fullscreen_tab(&mut self, tab: Option<SideTab>, cx: &mut Context<Self>) {

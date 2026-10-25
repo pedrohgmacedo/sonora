@@ -15,12 +15,13 @@ use ui::Input;
 use crate::chrome::Chrome;
 use crate::shared::menus::{ItemMenu, album_menu, artist_menu, playlist_menu};
 use state::{
-    AlbumHit, ArtistHit, Genres, Hit, Kind, Network, Playback, PlaylistHit, Search, Sonora,
+    AlbumHit, AppSettings, ArtistHit, Genres, Hit, Kind, Network, Playback, PlaylistHit, Search,
+    SearchScope, Session, Sonora,
 };
 use ui::ActiveTheme as _;
 use ui::{
-    Activate, Card, Deck, Deselect, Pinnable, Popup, Room, Scrollbar, Scroller, SelectLeft,
-    SelectNext, SelectPrevious, SelectRight, Separator, Text, Theme, VAST, clock, eyebrow,
+    Activate, Button, Card, Deck, Deselect, Pinnable, Popup, Room, Scrollbar, Scroller, SelectLeft,
+    SelectNext, SelectPrevious, SelectRight, Separator, TabBar, Text, Theme, VAST, clock, eyebrow,
     scrolled, snapped, tabular, vacant,
 };
 
@@ -69,6 +70,8 @@ impl HitMenu {
 pub(crate) struct SearchView {
     input: Entity<Input>,
     search: Entity<Search>,
+    settings: Entity<AppSettings>,
+    session: Entity<Session>,
     genres: Entity<Genres>,
     playback: Entity<Playback>,
     playback_status: PlaybackStatus,
@@ -119,6 +122,10 @@ impl SearchView {
         let library = Sonora::global(cx).library.clone();
         cx.observe(&library, |_, _, cx| cx.notify()).detach();
         let current_playback = playback_status(&playback, cx);
+        let settings = Sonora::global(cx).settings.clone();
+        let session = Sonora::global(cx).session.clone();
+        let initial_scope = settings.read(cx).search_scope();
+        search.update(cx, |search, cx| search.set_scope(initial_scope, cx));
         cx.observe(&playback, |this, playback, cx| {
             let current = playback_status(&playback, cx);
             if this.playback_status != current {
@@ -137,6 +144,8 @@ impl SearchView {
         Self {
             input,
             search,
+            settings,
+            session,
             genres,
             playback,
             playback_status: current_playback,
@@ -251,7 +260,11 @@ impl SearchView {
             }
             Hit::Artist(artist) => {
                 if let Some(id) = artist.id {
-                    navigate(Destination::Artist(id.into()), cx);
+                    let destination = match self.search.read(cx).scope() {
+                        SearchScope::Library => Destination::LibraryArtist(id.into()),
+                        SearchScope::Catalog => Destination::Artist(id.into()),
+                    };
+                    navigate(destination, cx);
                 }
             }
             Hit::Album(album) => navigate(Destination::Album(album.id.into()), cx),
@@ -777,6 +790,46 @@ impl SearchView {
             )
             .into_any_element()
     }
+
+    fn render_scope_toggle(&self, cx: &mut Context<Self>) -> TabBar {
+        let scope = self.search.read(cx).scope();
+        let provider = self
+            .session
+            .read(cx)
+            .provider_name()
+            .map(SharedString::from)
+            .unwrap_or_else(|| t!("search-scope-catalog"));
+        TabBar::new("search-scope-tabs").items([
+            Button::new("scope-catalog")
+                .label(provider)
+                .small()
+                .ghost()
+                .selected(scope == SearchScope::Catalog)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.search.update(cx, |search, cx| {
+                        search.set_scope(SearchScope::Catalog, cx);
+                    });
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_search_scope(SearchScope::Catalog, cx);
+                    });
+                    cx.notify();
+                })),
+            Button::new("scope-library")
+                .label(t!("search-scope-library"))
+                .small()
+                .ghost()
+                .selected(scope == SearchScope::Library)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.search.update(cx, |search, cx| {
+                        search.set_scope(SearchScope::Library, cx);
+                    });
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_search_scope(SearchScope::Library, cx);
+                    });
+                    cx.notify();
+                })),
+        ])
+    }
 }
 
 fn stacked(window: &Window, cx: &App) -> bool {
@@ -828,7 +881,13 @@ fn pressed(
             Press::Song(track) => this
                 .playback
                 .update(cx, |playback, cx| playback.play_radio(track, cx)),
-            Press::Artist(id) => navigate(Destination::Artist(id.clone().into()), cx),
+            Press::Artist(id) => {
+                let destination = match this.search.read(cx).scope() {
+                    SearchScope::Library => Destination::LibraryArtist(id.clone().into()),
+                    SearchScope::Catalog => Destination::Artist(id.clone().into()),
+                };
+                navigate(destination, cx);
+            }
             Press::Album(id) => navigate(Destination::Album(id.clone().into()), cx),
             Press::Playlist(id) => navigate(Destination::Playlist(id.clone().into()), cx),
         })
@@ -1035,8 +1094,15 @@ impl Render for SearchView {
                 div()
                     .flex()
                     .flex_none()
+                    .gap_3()
                     .px(gutter)
-                    .child(self.input.clone()),
+                    .when_else(
+                        stacked,
+                        |this| this.flex_col().items_stretch(),
+                        |this| this.flex_row().items_center(),
+                    )
+                    .child(self.input.clone())
+                    .child(div().flex_none().child(self.render_scope_toggle(cx))),
             )
             .when(!stacked, |this| {
                 this.children(self.best(cx).map(|best| div().px(gutter).child(best)))

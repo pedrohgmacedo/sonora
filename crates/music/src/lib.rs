@@ -76,6 +76,13 @@ pub fn is_local_id(id: &str) -> bool {
         || id.starts_with(LOCAL_PLAYLIST_PREFIX)
 }
 
+/// Whether an id belongs to a provider's own private user library (such as an Apple Music
+/// uploaded resource prefix like `r.xxx`, `i.xxx`, `l.xxx`, `p.xxx`) rather than a global catalog item.
+pub fn is_library_id(id: &str) -> bool {
+    let mut letters = id.chars();
+    matches!(letters.next(), Some('i' | 'l' | 'r' | 'p')) && letters.next() == Some('.')
+}
+
 pub fn distinct_covers(tracks: &[Track], wanted: usize) -> Vec<String> {
     let mut covers: Vec<String> = Vec::with_capacity(wanted);
     for cover in tracks.iter().filter_map(|track| track.cover.as_deref()) {

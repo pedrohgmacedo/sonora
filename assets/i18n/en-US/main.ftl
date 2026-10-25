@@ -376,6 +376,10 @@ play-shuffle = Shuffle
 
 # artist page
 artist-eyebrow = Artist
+artist-library-eyebrow = Artist in Library
+artist-library-songs = Songs
+artist-view-catalog = View on { $provider }
+artist-view-library = In Your Library
 artist-monthly-listeners = { $count ->
     [one] { $value } monthly listener
    *[other] { $value } monthly listeners
@@ -431,6 +435,8 @@ home-collection-albums = Albums from your collection
 
 # search page
 search-placeholder = What do you want to listen to?
+search-scope-catalog = Catalog
+search-scope-library = Your Library
 search-browse = Browse all
 genre-empty = Nothing to show here yet
 search-best-match = Best match

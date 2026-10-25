@@ -338,6 +338,7 @@ pub enum Destination {
     Song(SharedString),
     Playlist(SharedString),
     Artist(SharedString),
+    LibraryArtist(SharedString),
     User(SharedString),
     Genre(SharedString),
     Search,
@@ -362,8 +363,11 @@ impl From<&ui::Pin> for Destination {
 impl Destination {
     pub fn same_section(&self, other: &Destination) -> bool {
         match (self, other) {
-            (Destination::Library(_), Destination::Library(_))
-            | (Destination::Local(_), Destination::Local(_)) => true,
+            (
+                Destination::Library(_) | Destination::LibraryArtist(_),
+                Destination::Library(_) | Destination::LibraryArtist(_),
+            ) => true,
+            (Destination::Local(_), Destination::Local(_)) => true,
             _ if self.in_settings() && other.in_settings() => true,
             _ => self == other,
         }
@@ -372,6 +376,14 @@ impl Destination {
     /// Whether this destination is a settings page, the equalizer included.
     pub fn in_settings(&self) -> bool {
         matches!(self, Destination::Settings(_) | Destination::Equalizer)
+    }
+
+    /// Whether this destination is within the user's library or local files.
+    pub fn in_library(&self) -> bool {
+        matches!(
+            self,
+            Destination::Library(_) | Destination::LibraryArtist(_) | Destination::Local(_)
+        )
     }
 
     /// The settings page a drill-in's back button returns to. Only drill-ins have one.

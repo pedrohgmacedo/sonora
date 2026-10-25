@@ -407,6 +407,7 @@ impl PlayerBar {
             .min_w_0()
             .child(headline)
             .when_some(track, |this, track| {
+                let track_id = track.id.clone();
                 this.child(
                     InlineLinks::new(
                         "now-playing-artist",
@@ -419,8 +420,19 @@ impl PlayerBar {
                     .text_size(artists)
                     .when(centered, |this| this.justify_center())
                     .truncate()
-                    .on_click(|id, cx| {
-                        navigate(Destination::Artist(id), cx);
+                    .on_click(move |id, cx| {
+                        let current = router::trail(cx).read(cx).current();
+                        let in_library_context = current.in_library();
+                        let library = Sonora::global(cx).library.clone();
+                        let track_in_library = track_id.as_deref().is_some_and(|tid| {
+                            let lib = library.read(cx);
+                            lib.saved(tid) || lib.in_library(tid)
+                        });
+                        let destination = match in_library_context || track_in_library {
+                            true => Destination::LibraryArtist(id),
+                            false => Destination::Artist(id),
+                        };
+                        navigate(destination, cx);
                     }),
                 )
             })

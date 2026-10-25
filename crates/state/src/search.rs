@@ -5,7 +5,7 @@ use anyhow::Result;
 use gpui::{Context, Entity, Task};
 use music::{Album, ArtistRef, Playlist, Track};
 
-use crate::{Io, Library, Network, Session, SessionEvent, Shelf, join};
+use crate::{Io, Library, Network, SearchScope, Session, SessionEvent, Shelf, join};
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
 const LIMIT: usize = 20;
@@ -121,6 +121,7 @@ struct Scored {
 
 pub struct Search {
     query: String,
+    scope: SearchScope,
     served: Option<String>,
     catalog: Catalog,
     portraits: HashMap<String, String>,
@@ -159,6 +160,7 @@ impl Search {
 
         Self {
             query: String::new(),
+            scope: SearchScope::Catalog,
             served: None,
             catalog: Catalog::default(),
             portraits: HashMap::new(),
@@ -175,6 +177,21 @@ impl Search {
 
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    pub fn scope(&self) -> SearchScope {
+        self.scope
+    }
+
+    pub fn set_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
+        if self.scope == scope {
+            return;
+        }
+        self.scope = scope;
+        self.served = None;
+        let query = self.query.clone();
+        self.query.clear();
+        self.ask(&query, cx);
     }
 
     pub fn hits(&self) -> &[Hit] {
@@ -223,6 +240,15 @@ impl Search {
             self.catalog.clear();
             self.served = Some(String::new());
             self.loading = false;
+            self.rank(cx);
+            return;
+        }
+
+        if self.scope == SearchScope::Library {
+            self.task = None;
+            self.catalog.clear();
+            self.loading = false;
+            self.served = Some(query);
             self.rank(cx);
             return;
         }
@@ -341,18 +367,50 @@ impl Search {
         self.hits = {
             let held = self.library.read(cx);
             let state = held.state(Shelf::Streaming);
-            rank(
-                state.tracks(),
-                state.albums(),
-                state.playlists(),
-                &self.catalog,
-                &self.portraits,
-                query,
-            )
+            match self.scope {
+                SearchScope::Library => rank_library(
+                    state.tracks(),
+                    state.albums(),
+                    state.playlists(),
+                    &self.portraits,
+                    query,
+                ),
+                SearchScope::Catalog => rank(
+                    state.tracks(),
+                    state.albums(),
+                    state.playlists(),
+                    &self.catalog,
+                    &self.portraits,
+                    query,
+                ),
+            }
         };
-        self.fetch_portraits(cx);
+        if self.scope == SearchScope::Catalog {
+            self.fetch_portraits(cx);
+        }
         cx.notify();
     }
+}
+
+fn rank_library(
+    library: &[Track],
+    albums: &[Album],
+    playlists: &[Playlist],
+    portraits: &HashMap<String, String>,
+    asked: &str,
+) -> Vec<Hit> {
+    let query = Query::new(asked);
+    if query.terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut all = songs(library, &[], &query);
+    all.extend(artists(library, &[], albums, portraits, &query));
+    all.extend(albums_of(albums, library, &Catalog::default(), &query));
+    all.extend(playlists_of(playlists, &[], &query));
+    order(&mut all);
+
+    all.into_iter().map(|scored| scored.hit).collect()
 }
 
 fn rank(

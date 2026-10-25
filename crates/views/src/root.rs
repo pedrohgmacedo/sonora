@@ -530,7 +530,7 @@ impl Root {
             Destination::Settings(_) => {
                 self.screens.settings.update(cx, |view, cx| view.escape(cx));
             }
-            Destination::Artist(_) => {
+            Destination::Artist(_) | Destination::LibraryArtist(_) => {
                 if let Some(artist) = self.screens.artist.clone() {
                     artist.update(cx, |view, cx| view.escape(cx));
                 }
@@ -600,7 +600,7 @@ impl Root {
                 let detail = self.screens.playlist_detail.clone()?;
                 Box::new(move |cx| detail.read(cx).is_loading())
             }
-            Destination::Artist(_) => {
+            Destination::Artist(_) | Destination::LibraryArtist(_) => {
                 let detail = self.screens.artist_detail.clone()?;
                 Box::new(move |cx| detail.read(cx).is_loading())
             }
@@ -653,6 +653,11 @@ impl Root {
             Destination::Artist(_) => {
                 if let Some(detail) = self.screens.artist_detail.clone() {
                     detail.update(cx, |detail, cx| detail.refresh(cx));
+                }
+            }
+            Destination::LibraryArtist(_) => {
+                if let Some(detail) = self.screens.artist_detail.clone() {
+                    detail.update(cx, |detail, cx| detail.refresh_library(cx));
                 }
             }
             Destination::Genre(_) => {
@@ -878,6 +883,12 @@ impl Root {
             Destination::Artist(id) => {
                 let (artist, detail) = self.artist(cx);
                 detail.update(cx, |artist, cx| artist.open(&id, cx));
+                toolbar = Some(artist.read(cx).toolbar());
+                artist.into()
+            }
+            Destination::LibraryArtist(id) => {
+                let (artist, detail) = self.artist(cx);
+                detail.update(cx, |artist, cx| artist.open_library(&id, cx));
                 toolbar = Some(artist.read(cx).toolbar());
                 artist.into()
             }
